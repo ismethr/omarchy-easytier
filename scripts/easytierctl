@@ -1,0 +1,112 @@
+#!/usr/bin/python3
+"""Small, secret-free adapter between the Omarchy widget and EasyTier."""
+import concurrent.futures
+import ipaddress
+import json
+import math
+import os
+import subprocess
+import sys
+import time
+
+UNIT = "easytier.service"
+ENV = dict(os.environ, LC_ALL="C")
+
+
+def invoke(args, timeout=4):
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=ENV)
+
+
+def rpc(*args):
+    try:
+        result = invoke(["/usr/bin/easytier-cli", "-o", "json", *args])
+        return json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def address(value):
+    try:
+        return str(ipaddress.ip_interface(str(value)).ip)
+    except ValueError:
+        return ""
+
+
+def normalize_peers(raw):
+    peers = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict) or item.get("cost") == "Local":
+            continue
+        try:
+            latency = float(item.get("lat_ms"))
+            if not math.isfinite(latency) or latency < 0:
+                latency = None
+        except (TypeError, ValueError):
+            latency = None
+        cost = str(item.get("cost", ""))
+        peers.append({
+            "ip": address(item.get("ipv4")),
+            "name": str(item.get("hostname") or "未命名节点")[:80],
+            "kind": "direct" if cost.lower() == "p2p" else "relay",
+            "latency": latency,
+            "protocol": str(item.get("tunnel_proto") or "")[:32],
+        })
+    return sorted(peers, key=lambda p: (p["kind"] != "direct", p["ip"], p["name"]))
+
+
+def status():
+    try:
+        result = invoke(["/usr/bin/systemctl", "show", UNIT, "--no-pager",
+                         "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "LoadState"])
+        props = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    except (OSError, subprocess.TimeoutExpired):
+        props = {}
+    state = props.get("ActiveState", "unknown")
+    data = {
+        "installed": props.get("LoadState") == "loaded",
+        "service": state,
+        "running": state in ("active", "activating", "reloading"),
+        "autostart": props.get("UnitFileState") == "enabled",
+        "rpc": False, "ip": "", "version": "", "shared": [], "peers": [],
+        "checked_at": int(time.time()),
+    }
+    if state not in ("active", "activating", "reloading"):
+        return data
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        node_job = pool.submit(rpc, "node", "info")
+        peer_job = pool.submit(rpc, "peer", "list")
+        node, peers = node_job.result(), peer_job.result()
+    # node info contains the entire configuration, including its secret. Only
+    # the allowlisted fields below may leave this process.
+    if isinstance(node, dict):
+        data.update(rpc=True, ip=address(node.get("ipv4_addr")),
+                    version=str(node.get("version") or "")[:40],
+                    shared=[str(c)[:64] for c in node.get("proxy_cidrs", [])])
+    data["peers"] = normalize_peers(peers)
+    data["peers_ready"] = isinstance(peers, list)
+    return data
+
+
+def action(verb):
+    if verb not in ("start", "stop", "restart"):
+        return {"ok": False, "error": "不支持的操作"}
+    try:
+        result = invoke(["/usr/bin/systemctl", "--no-ask-password", verb, UNIT], timeout=25)
+        if result.returncode == 0:
+            return {"ok": True}
+        return {"ok": False, "error": "操作未获授权或服务启动失败，请查看 EasyTier 日志。"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "操作超时，正在重新检查服务状态。"}
+    except OSError:
+        return {"ok": False, "error": "无法调用系统服务管理器。"}
+
+
+def main():
+    verb = sys.argv[1] if len(sys.argv) == 2 else ""
+    data = status() if verb == "status" else action(verb)
+    print(json.dumps(data, ensure_ascii=False, allow_nan=False))
+    return 0 if verb == "status" or data.get("ok") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

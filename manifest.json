@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "wdleo.easytier",
+  "name": "EasyTier",
+  "version": "1.0.0",
+  "author": "ismethr",
+  "license": "MIT",
+  "description": "EasyTier 组网状态、节点列表及服务开关。",
+  "kinds": ["bar-widget"],
+  "entryPoints": {"barWidget": "Panel.qml"},
+  "barWidget": {
+    "displayName": "EasyTier",
+    "description": "查看组网 IP、节点和延迟，快速启动或停止 EasyTier。",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {"pollSeconds": 5},
+    "schema": [
+      {"key": "pollSeconds", "type": "integer", "label": "刷新间隔（秒）", "min": 3, "max": 60, "step": 1, "defaultValue": 5}
+    ]
+  }
+}
